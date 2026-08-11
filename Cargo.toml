@@ -1,0 +1,21 @@
+[package]
+name = "bitb-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Synchronous access to one TNRG BitBabbler White or Black RNG over USB"
+license = "MIT"
+readme = "README.md"
+keywords = ["bitbabbler", "entropy", "hardware", "rng", "usb"]
+categories = ["hardware-support", "cryptography"]
+exclude = [
+    "bit-babbler-0.9/**",
+    "docs/specs/**",
+    "docs/plans/**",
+]
+
+[dependencies]
+rusb = "0.9"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
