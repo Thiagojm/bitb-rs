@@ -99,11 +99,10 @@ pub(crate) fn initialize<H: UsbHandle + ?Sized>(
     for attempt in 1..=FTDI_INIT_RETRIES {
         match try_initialize_once(handle, session) {
             Ok(()) => return Ok(()),
-            Err(BitBabblerError::DeviceDisconnected)
-            | Err(BitBabblerError::PermissionDenied)
-            | Err(BitBabblerError::DeviceBusy) => {
-                return Err(BitBabblerError::InitializationFailed { attempts: attempt });
-            }
+            // Presence/access failures are not retryable init budget.
+            err @ Err(BitBabblerError::DeviceDisconnected)
+            | err @ Err(BitBabblerError::PermissionDenied)
+            | err @ Err(BitBabblerError::DeviceBusy) => return err,
             Err(_) if attempt == FTDI_INIT_RETRIES => {
                 return Err(BitBabblerError::InitializationFailed { attempts: attempt });
             }
@@ -785,6 +784,119 @@ mod tests {
         )));
         assert!(controls.contains(&(FTDI_SIO_SET_BITMODE, BITMODE_RESET, FTDI_INTERFACE_INDEX)));
         assert!(controls.contains(&(FTDI_SIO_SET_BITMODE, BITMODE_MPSSE, FTDI_INTERFACE_INDEX)));
+    }
+
+    fn significant_init_ops(
+        log: &[crate::transport::mock::RecordedOp],
+    ) -> Vec<crate::transport::mock::RecordedOp> {
+        log.iter()
+            .filter(|op| {
+                matches!(
+                    op,
+                    crate::transport::mock::RecordedOp::ControlOut { .. }
+                        | crate::transport::mock::RecordedOp::ControlIn { .. }
+                        | crate::transport::mock::RecordedOp::BulkWrite(_)
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn initialize_end_to_end_records_expected_order() {
+        let mut handle = MockHandle::new(64);
+        let mut session = session_64();
+        initialize(&mut handle, &mut session).expect("initialize");
+        assert_eq!(session.line_status, LINE_STATUS_OK_MASK);
+
+        let clk_div = clock_divisor();
+        let clock_cmd = vec![
+            MPSSE_NO_CLK_DIV5,
+            MPSSE_NO_ADAPTIVE_CLK,
+            MPSSE_NO_3PHASE_CLK,
+            MPSSE_SET_DATABITS_LOW,
+            pin_value_byte(),
+            pin_direction_byte(),
+            MPSSE_SET_DATABITS_HIGH,
+            0x00,
+            0x00,
+            MPSSE_SET_CLK_DIVISOR,
+            (clk_div & 0xFF) as u8,
+            (clk_div >> 8) as u8,
+            MPSSE_NO_LOOPBACK,
+        ];
+
+        use crate::transport::mock::RecordedOp;
+        let expected = [
+            RecordedOp::ControlOut {
+                request: FTDI_SIO_RESET,
+                value: FTDI_SIO_RESET_SIO,
+                index: FTDI_INTERFACE_INDEX,
+            },
+            RecordedOp::ControlOut {
+                request: FTDI_SIO_SET_EVENT_CHAR,
+                value: 0,
+                index: FTDI_INTERFACE_INDEX,
+            },
+            RecordedOp::ControlOut {
+                request: FTDI_SIO_SET_ERROR_CHAR,
+                value: 0,
+                index: FTDI_INTERFACE_INDEX,
+            },
+            RecordedOp::ControlOut {
+                request: FTDI_SIO_SET_LATENCY_TIMER,
+                value: 2,
+                index: FTDI_INTERFACE_INDEX,
+            },
+            RecordedOp::ControlOut {
+                request: FTDI_SIO_SET_FLOW_CTRL,
+                value: 0,
+                index: FLOW_RTS_CTS | FTDI_INTERFACE_INDEX,
+            },
+            RecordedOp::ControlOut {
+                request: FTDI_SIO_SET_BITMODE,
+                value: BITMODE_RESET,
+                index: FTDI_INTERFACE_INDEX,
+            },
+            RecordedOp::ControlOut {
+                request: FTDI_SIO_SET_BITMODE,
+                value: BITMODE_MPSSE,
+                index: FTDI_INTERFACE_INDEX,
+            },
+            RecordedOp::ControlIn {
+                request: FTDI_SIO_GET_MODEM_STATUS,
+                value: 0,
+                index: FTDI_INTERFACE_INDEX,
+                len: 2,
+            },
+            RecordedOp::BulkWrite(vec![0xAA, MPSSE_SEND_IMMEDIATE]),
+            RecordedOp::BulkWrite(vec![0xAB, MPSSE_SEND_IMMEDIATE]),
+            RecordedOp::BulkWrite(clock_cmd),
+        ];
+        assert_eq!(significant_init_ops(&handle.log()), expected);
+    }
+
+    #[test]
+    fn initialize_preserves_fatal_usb_errors() {
+        let cases = [
+            BitBabblerError::DeviceDisconnected,
+            BitBabblerError::PermissionDenied,
+            BitBabblerError::DeviceBusy,
+        ];
+        for expected in cases {
+            let mut handle = MockHandle::new(64);
+            let mut session = session_64();
+            match &expected {
+                BitBabblerError::DeviceDisconnected => handle.set_disconnected(true),
+                other => handle.set_next_control_error(other.clone()),
+            }
+            let err = initialize(&mut handle, &mut session).unwrap_err();
+            assert_eq!(err, expected, "got {err:?}");
+            assert!(
+                !matches!(err, BitBabblerError::InitializationFailed { .. }),
+                "fatal USB error must not be remapped to InitializationFailed"
+            );
+        }
     }
 
     #[test]

@@ -409,7 +409,7 @@ pub(crate) mod mock {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     #[allow(dead_code)] // fields retained for richer init/protocol assertions
     pub(crate) enum RecordedOp {
         SetConfiguration(u8),
@@ -451,6 +451,8 @@ pub(crate) mod mock {
         partial_reads: VecDeque<usize>,
         /// Remaining data bytes still owed for the last MPSSE read command.
         pending_data: Option<usize>,
+        /// One-shot error returned by the next vendor control transfer.
+        fail_control: Option<BitBabblerError>,
     }
 
     #[derive(Debug, Clone)]
@@ -493,6 +495,10 @@ pub(crate) mod mock {
             self.inner.lock().unwrap().partial_reads.push_back(n);
         }
 
+        pub(crate) fn set_next_control_error(&self, err: BitBabblerError) {
+            self.inner.lock().unwrap().fail_control = Some(err);
+        }
+
         pub(crate) fn log(&self) -> Vec<RecordedOp> {
             self.inner.lock().unwrap().log.clone()
         }
@@ -533,6 +539,9 @@ pub(crate) mod mock {
             if g.disconnected {
                 return Err(BitBabblerError::DeviceDisconnected);
             }
+            if let Some(err) = g.fail_control.take() {
+                return Err(err);
+            }
             g.log.push(RecordedOp::ControlOut {
                 request,
                 value,
@@ -551,6 +560,9 @@ pub(crate) mod mock {
             let mut g = self.inner.lock().unwrap();
             if g.disconnected {
                 return Err(BitBabblerError::DeviceDisconnected);
+            }
+            if let Some(err) = g.fail_control.take() {
+                return Err(err);
             }
             g.log.push(RecordedOp::ControlIn {
                 request,
@@ -574,23 +586,37 @@ pub(crate) mod mock {
             // Parse MPSSE byte-in commands so framed reads only emit the
             // exact payload length the command requested (like real hardware).
             // Command: 0x20, len_lo, len_hi, 0x87  with encoded length = len-1.
-            if data.len() >= 4 {
-                let mut i = 0usize;
-                while i + 3 < data.len() {
-                    if data[i] == 0x20 && data[i + 3] == 0x87 {
-                        let encoded = u16::from(data[i + 1]) | (u16::from(data[i + 2]) << 8);
-                        let nbytes = usize::from(encoded) + 1;
-                        g.pending_data = Some(g.pending_data.unwrap_or(0).saturating_add(nbytes));
-                        i += 4;
-                        continue;
-                    }
-                    // Sync probe: 0xAA/0xAB + SEND_IMMEDIATE — no data payload.
-                    if (data[i] == 0xAA || data[i] == 0xAB) && data[i + 1] == 0x87 {
-                        i += 2;
-                        continue;
-                    }
-                    i += 1;
+            // Sync probe is 2 bytes (0xAA/0xAB + 0x87) and may be a standalone write.
+            let mut i = 0usize;
+            while i < data.len() {
+                if i + 3 < data.len() && data[i] == 0x20 && data[i + 3] == 0x87 {
+                    let encoded = u16::from(data[i + 1]) | (u16::from(data[i + 2]) << 8);
+                    let nbytes = usize::from(encoded) + 1;
+                    g.pending_data = Some(g.pending_data.unwrap_or(0).saturating_add(nbytes));
+                    i += 4;
+                    continue;
                 }
+                if i + 1 < data.len() && (data[i] == 0xAA || data[i] == 0xAB) && data[i + 1] == 0x87
+                {
+                    // Hardware echoes 0xFA + the probe after FTDI status bytes.
+                    // Only synthesize when the test has not scripted a reply.
+                    if g.responses.is_empty() {
+                        let expect_modem = if g.max_packet == 64 {
+                            0x01 | 0x10 | 0x20
+                        } else {
+                            0x02 | 0x10 | 0x20
+                        };
+                        g.responses.push_back(MockResponse::Bytes(vec![
+                            expect_modem,
+                            0x60,
+                            0xFA,
+                            data[i],
+                        ]));
+                    }
+                    i += 2;
+                    continue;
+                }
+                i += 1;
             }
             Ok(data.len())
         }
