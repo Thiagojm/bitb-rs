@@ -15,6 +15,7 @@ Provide a small synchronous Rust library to open one TNRG BitBabbler White or Bl
 2. `get_bits` (raw) or `get_bits_with_fold` (folds 0–4)
 3. `random_u64` / `random_range` (always raw)
 4. Drop handle; reopen after disconnect
+5. `examples/bitb_lab.rs` for explicit manual API and throughput exercises
 
 ## Vocabulary
 
@@ -36,4 +37,6 @@ Provide a small synchronous Rust library to open one TNRG BitBabbler White or Bl
 - **Physical White (Windows):** validated with
   `cargo test --test hardware -- --ignored --test-threads=1 --nocapture`
   (list/open, raw, folds 1–4, `random_u64`/`random_range`). Re-run after hardware-test reliability fixes.
+- **Laboratory example:** parser/formatting are covered by `cargo test --all-targets`; physical smoke runs are manual and descriptive only, with no output gating.
+- **Repository:** published publicly as `Thiagojm/bitb-rs`; crate and repository use the MIT license. The local GPL reference remains excluded.
 - **Black / Linux:** not confirmed until native runs exist. Cross-compile without sysroot is not Linux validation.

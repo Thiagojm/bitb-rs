@@ -6,6 +6,7 @@ rust-version = "1.85"
 description = "Synchronous access to one TNRG BitBabbler White or Black RNG over USB"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/Thiagojm/bitb-rs"
 keywords = ["bitbabbler", "entropy", "hardware", "rng", "usb"]
 categories = ["hardware-support", "cryptography"]
 exclude = [

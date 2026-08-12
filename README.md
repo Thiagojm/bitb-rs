@@ -134,6 +134,25 @@ If the device is unplugged or a reset invalidates the handle, methods return an 
 
 The API is blocking and uses `&mut self` for collection. In async hosts, run calls on a blocking thread pool (`tokio::task::spawn_blocking`, Tauri `spawn_blocking`, etc.). Do not share one handle across threads without external mutual exclusion; `Sync` is not part of the public contract.
 
+## BitBabbler laboratory
+
+`examples/bitb_lab.rs` is a command-line laboratory for exercising the public
+API against a White or Black device:
+
+```text
+cargo run --release --example bitb_lab -- --bits 8192 --samples 10
+cargo run --release --example bitb_lab -- --bits 64 --fold 2 --format binary
+cargo run --release --example bitb_lab -- --mode u64 --samples 20
+cargo run --release --example bitb_lab -- --mode range --start 0 --end 10 --samples 10000
+cargo run --release --example bitb_lab -- --serial YOUR_SERIAL --fold 1
+```
+
+Use `--help` for every option. Fold defaults to `0` and is accepted only in
+`bits` mode; `u64` and `range` always exercise the raw APIs. The displayed bit
+counts, byte frequencies, runs, histograms, and throughput are descriptive
+only: they never reject, replace, or gate device output and are not health
+checks.
+
 ## Building and testing
 
 ### Deterministic suite (no hardware claim)
