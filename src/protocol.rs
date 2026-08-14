@@ -3,7 +3,7 @@
 //! Behavior is reimplemented from the observed BitBabbler protocol. No GPL
 //! source text or structures are copied.
 
-use crate::error::BitBabblerError;
+use crate::error::{BitBabblerError, ProtocolOperation};
 use crate::policy::{
     CLOCK_SETTLE_MS, FTDI_INIT_RETRIES, FTDI_INTERFACE_INDEX, FTDI_READ_RETRIES,
     MAX_MPSSE_READ_BYTES, MPSSE_SETTLE_MS, clock_divisor, latency_timer_ms, pin_direction_byte,
@@ -85,7 +85,9 @@ pub(crate) fn expected_modem_status(max_packet: u16) -> Result<u8, BitBabblerErr
         _ => {
             // Accept other sizes only if they match one of the known markers
             // by using MAX64 for ≤64-ish and MAX512 otherwise is wrong; reject.
-            return Err(BitBabblerError::protocol("unsupported_max_packet"));
+            return Err(BitBabblerError::protocol(
+                ProtocolOperation::UnsupportedMaxPacket,
+            ));
         }
     };
     Ok(size_bit | FTDI_CTS | FTDI_DSR)
@@ -96,25 +98,33 @@ pub(crate) fn initialize<H: UsbHandle + ?Sized>(
     handle: &mut H,
     session: &mut FtdiSession,
 ) -> Result<(), BitBabblerError> {
+    let mut last_err = None;
     for attempt in 1..=FTDI_INIT_RETRIES {
         match try_initialize_once(handle, session) {
             Ok(()) => return Ok(()),
             // Presence/access failures are not retryable init budget.
-            err @ Err(BitBabblerError::DeviceDisconnected)
-            | err @ Err(BitBabblerError::PermissionDenied)
-            | err @ Err(BitBabblerError::DeviceBusy) => return err,
-            Err(_) if attempt == FTDI_INIT_RETRIES => {
-                return Err(BitBabblerError::InitializationFailed { attempts: attempt });
+            Err(BitBabblerError::DeviceDisconnected) => {
+                return Err(BitBabblerError::DeviceDisconnected);
             }
-            Err(_) => {
-                // Soft recovery: clear local state and retry full init.
+            Err(BitBabblerError::PermissionDenied) => {
+                return Err(BitBabblerError::PermissionDenied);
+            }
+            Err(BitBabblerError::DeviceBusy) => {
+                return Err(BitBabblerError::DeviceBusy);
+            }
+            Err(err) => {
+                last_err = Some(err);
                 session.clear_chunk();
+                if attempt == FTDI_INIT_RETRIES {
+                    break;
+                }
             }
         }
     }
-    Err(BitBabblerError::InitializationFailed {
-        attempts: FTDI_INIT_RETRIES,
-    })
+    Err(BitBabblerError::initialization_failed(
+        FTDI_INIT_RETRIES,
+        last_err.expect("init retry loop exits only after a failed attempt"),
+    ))
 }
 
 fn try_initialize_once<H: UsbHandle + ?Sized>(
@@ -122,7 +132,7 @@ fn try_initialize_once<H: UsbHandle + ?Sized>(
     session: &mut FtdiSession,
 ) -> Result<(), BitBabblerError> {
     if !init_mpsse(handle, session)? {
-        return Err(BitBabblerError::protocol("mpsse_sync"));
+        return Err(BitBabblerError::protocol(ProtocolOperation::MpsseSync));
     }
 
     let clk_div = clock_divisor();
@@ -143,7 +153,7 @@ fn try_initialize_once<H: UsbHandle + ?Sized>(
     ];
     write_all(handle, session, &cmd)?;
     sleep_ms(CLOCK_SETTLE_MS);
-    let _ = purge_read(handle, session);
+    purge_read(handle, session)?;
     Ok(())
 }
 
@@ -152,7 +162,7 @@ fn init_mpsse<H: UsbHandle + ?Sized>(
     session: &mut FtdiSession,
 ) -> Result<bool, BitBabblerError> {
     ftdi_reset(handle)?;
-    let _ = purge_read(handle, session);
+    purge_read(handle, session)?;
     ftdi_set_special_chars(handle)?;
     let latency = latency_timer_ms(session.endpoints.max_packet);
     ftdi_set_latency_timer(handle, latency)?;
@@ -218,7 +228,9 @@ pub(crate) fn read_exact_raw<H: UsbHandle + ?Sized>(
     len: usize,
 ) -> Result<Vec<u8>, BitBabblerError> {
     if len == 0 || len > MAX_MPSSE_READ_BYTES {
-        return Err(BitBabblerError::protocol("mpsse_read_length"));
+        return Err(BitBabblerError::protocol(
+            ProtocolOperation::MpsseReadLength,
+        ));
     }
 
     let mut out = Vec::new();
@@ -249,7 +261,9 @@ pub(crate) fn read_exact_raw_into<H: UsbHandle + ?Sized>(
     out: &mut Vec<u8>,
 ) -> Result<(), BitBabblerError> {
     if len == 0 || len > MAX_MPSSE_READ_BYTES {
-        return Err(BitBabblerError::protocol("mpsse_read_length"));
+        return Err(BitBabblerError::protocol(
+            ProtocolOperation::MpsseReadLength,
+        ));
     }
 
     let start_len = out.len();
@@ -288,12 +302,14 @@ pub(crate) fn read_exact_raw_into<H: UsbHandle + ?Sized>(
             if session.chunk_remaining() != 0 {
                 out.truncate(start_len);
                 session.clear_chunk();
-                return Err(BitBabblerError::protocol("excess_payload"));
+                return Err(BitBabblerError::protocol(ProtocolOperation::ExcessPayload));
             }
             if session.line_status != LINE_STATUS_OK_MASK {
                 out.truncate(start_len);
                 session.clear_chunk();
-                return Err(BitBabblerError::protocol("incomplete_line_status"));
+                return Err(BitBabblerError::protocol(
+                    ProtocolOperation::IncompleteLineStatus,
+                ));
             }
             return Ok(());
         }
@@ -411,13 +427,13 @@ fn drain_chunk(
                 let modem = session.chunk[session.chunk_head];
                 if modem != session.expect_modem_status {
                     session.clear_chunk();
-                    return Err(BitBabblerError::protocol("modem_status"));
+                    return Err(BitBabblerError::protocol(ProtocolOperation::ModemStatus));
                 }
                 if session.chunk_remaining() > 1 {
                     let line = session.chunk[session.chunk_head + 1];
                     if line & !LINE_STATUS_OK_MASK != 0 {
                         session.clear_chunk();
-                        return Err(BitBabblerError::protocol("line_status"));
+                        return Err(BitBabblerError::protocol(ProtocolOperation::LineStatus));
                     }
                     session.line_status = line;
                     skip = 2;
@@ -429,7 +445,7 @@ fn drain_chunk(
                 let line = session.chunk[session.chunk_head];
                 if line & !LINE_STATUS_OK_MASK != 0 {
                     session.clear_chunk();
-                    return Err(BitBabblerError::protocol("line_status"));
+                    return Err(BitBabblerError::protocol(ProtocolOperation::LineStatus));
                 }
                 session.line_status = line;
                 skip = 1;
@@ -470,10 +486,10 @@ fn validate_status_bytes(
     line: u8,
 ) -> Result<(), BitBabblerError> {
     if modem != session.expect_modem_status {
-        return Err(BitBabblerError::protocol("modem_status"));
+        return Err(BitBabblerError::protocol(ProtocolOperation::ModemStatus));
     }
     if line & !LINE_STATUS_OK_MASK != 0 {
-        return Err(BitBabblerError::protocol("line_status"));
+        return Err(BitBabblerError::protocol(ProtocolOperation::LineStatus));
     }
     Ok(())
 }
@@ -494,7 +510,7 @@ fn write_all<H: UsbHandle + ?Sized>(
     while offset < data.len() {
         let n = handle.bulk_write(session.endpoints.ep_out, &data[offset..])?;
         if n == 0 {
-            return Err(BitBabblerError::protocol("bulk_write_zero"));
+            return Err(BitBabblerError::protocol(ProtocolOperation::BulkWriteZero));
         }
         offset += n;
     }
@@ -575,7 +591,9 @@ fn ftdi_set_flow_control_rts_cts<H: UsbHandle + ?Sized>(
 fn ftdi_get_modem_status<H: UsbHandle + ?Sized>(handle: &mut H) -> Result<u16, BitBabblerError> {
     let bytes = handle.vendor_control_in(FTDI_SIO_GET_MODEM_STATUS, 0, FTDI_INTERFACE_INDEX, 2)?;
     if bytes.len() != 2 {
-        return Err(BitBabblerError::protocol("get_modem_status_len"));
+        return Err(BitBabblerError::protocol(
+            ProtocolOperation::GetModemStatusLen,
+        ));
     }
     Ok(u16::from(bytes[0]) << 8 | u16::from(bytes[1]))
 }
@@ -668,7 +686,7 @@ mod tests {
         assert_eq!(
             err,
             BitBabblerError::ProtocolViolation {
-                operation: "modem_status"
+                operation: ProtocolOperation::ModemStatus
             },
             "got {err:?}"
         );
@@ -685,7 +703,7 @@ mod tests {
         assert_eq!(
             err,
             BitBabblerError::ProtocolViolation {
-                operation: "line_status"
+                operation: ProtocolOperation::LineStatus
             },
             "got {err:?}"
         );
@@ -727,7 +745,7 @@ mod tests {
         handle.push_entropy(&[0x11, 0x22]);
         for _ in 0..30 {
             handle.push_response(MockResponse::Err(BitBabblerError::TransferTimeout {
-                operation: "bulk_read",
+                operation: crate::UsbOperation::BulkRead,
             }));
         }
         let err = read_exact_raw(&mut handle, &mut session, 8).unwrap_err();
@@ -921,7 +939,7 @@ mod tests {
         assert!(matches!(
             err,
             BitBabblerError::ProtocolViolation {
-                operation: "excess_payload"
+                operation: ProtocolOperation::ExcessPayload
             }
         ));
     }
@@ -940,7 +958,7 @@ mod tests {
         assert_eq!(
             err,
             BitBabblerError::ProtocolViolation {
-                operation: "incomplete_line_status"
+                operation: ProtocolOperation::IncompleteLineStatus
             },
             "got {err:?}"
         );

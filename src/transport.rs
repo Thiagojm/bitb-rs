@@ -3,7 +3,7 @@
 //! The trait exists only to allow deterministic unit tests. It is not part of
 //! the public API and is not a multi-backend abstraction for production.
 
-use crate::error::BitBabblerError;
+use crate::error::{BitBabblerError, ProtocolOperation, UsbOperation};
 use crate::policy::{
     PRODUCT_ID, USB_ALT_SETTING, USB_CONFIGURATION, USB_INTERFACE, USB_TIMEOUT_MS, VENDOR_ID,
 };
@@ -71,7 +71,7 @@ impl RusbHandle {
     fn open_device(device: &rusb::Device<rusb::GlobalContext>) -> Result<Self, BitBabblerError> {
         let handle = device
             .open()
-            .map_err(|e| BitBabblerError::from_rusb("open", e))?;
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::Open, e))?;
         Ok(Self {
             handle,
             claimed_interface: None,
@@ -85,13 +85,13 @@ impl UsbHandle for RusbHandle {
         let _ = self.handle.set_auto_detach_kernel_driver(true);
         self.handle
             .set_active_configuration(value)
-            .map_err(|e| BitBabblerError::from_rusb("set_configuration", e))
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::SetConfiguration, e))
     }
 
     fn claim_interface(&mut self, number: u8) -> Result<(), BitBabblerError> {
         self.handle
             .claim_interface(number)
-            .map_err(|e| BitBabblerError::from_rusb("claim_interface", e))?;
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::ClaimInterface, e))?;
         self.claimed_interface = Some(number);
         Ok(())
     }
@@ -100,7 +100,7 @@ impl UsbHandle for RusbHandle {
         let result = self
             .handle
             .release_interface(number)
-            .map_err(|e| BitBabblerError::from_rusb("release_interface", e));
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::ReleaseInterface, e));
         if result.is_ok() {
             self.claimed_interface = None;
         }
@@ -128,7 +128,7 @@ impl UsbHandle for RusbHandle {
                 &[],
                 std::time::Duration::from_millis(u64::from(USB_TIMEOUT_MS)),
             )
-            .map_err(|e| BitBabblerError::from_rusb("control_out", e))?;
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::ControlOut, e))?;
         Ok(())
     }
 
@@ -155,7 +155,7 @@ impl UsbHandle for RusbHandle {
                 &mut buf,
                 std::time::Duration::from_millis(u64::from(USB_TIMEOUT_MS)),
             )
-            .map_err(|e| BitBabblerError::from_rusb("control_in", e))?;
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::ControlIn, e))?;
         buf.truncate(n);
         Ok(buf)
     }
@@ -167,7 +167,7 @@ impl UsbHandle for RusbHandle {
                 data,
                 std::time::Duration::from_millis(u64::from(USB_TIMEOUT_MS)),
             )
-            .map_err(|e| BitBabblerError::from_rusb("bulk_write", e))
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::BulkWrite, e))
     }
 
     fn bulk_read(&mut self, endpoint: u8, buf: &mut [u8]) -> Result<usize, BitBabblerError> {
@@ -177,7 +177,7 @@ impl UsbHandle for RusbHandle {
                 buf,
                 std::time::Duration::from_millis(u64::from(USB_TIMEOUT_MS)),
             )
-            .map_err(|e| BitBabblerError::from_rusb("bulk_read", e))
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::BulkRead, e))
     }
 }
 
@@ -193,12 +193,18 @@ impl Drop for RusbHandle {
 pub(crate) fn enumerate_rusb() -> Result<Vec<EnumeratedDevice>, BitBabblerError> {
     let mut out = Vec::new();
 
-    let devices = rusb::devices().map_err(|e| BitBabblerError::from_rusb("list_devices", e))?;
+    let devices =
+        rusb::devices().map_err(|e| BitBabblerError::from_rusb(UsbOperation::ListDevices, e))?;
 
     for device in devices.iter() {
         let desc = match device.device_descriptor() {
             Ok(d) => d,
-            Err(e) => return Err(BitBabblerError::from_rusb("device_descriptor", e)),
+            Err(e) => {
+                return Err(BitBabblerError::from_rusb(
+                    UsbOperation::DeviceDescriptor,
+                    e,
+                ));
+            }
         };
         if desc.vendor_id() != VENDOR_ID || desc.product_id() != PRODUCT_ID {
             continue;
@@ -210,16 +216,16 @@ pub(crate) fn enumerate_rusb() -> Result<Vec<EnumeratedDevice>, BitBabblerError>
         let product = read_required_usb_string(
             &handle.handle,
             desc.product_string_index(),
-            "missing_product_string_index",
-            "read_product_string",
-            "empty_product_string",
+            ProtocolOperation::MissingProductStringIndex,
+            UsbOperation::ReadProductString,
+            ProtocolOperation::EmptyProductString,
         )?;
         let serial = read_required_usb_string(
             &handle.handle,
             desc.serial_number_string_index(),
-            "missing_serial_string_index",
-            "read_serial_string",
-            "empty_serial_string",
+            ProtocolOperation::MissingSerialStringIndex,
+            UsbOperation::ReadSerialString,
+            ProtocolOperation::EmptySerialString,
         )?;
 
         let bus_number = device.bus_number();
@@ -257,20 +263,21 @@ pub(crate) fn open_rusb(
         #[cfg(test)]
         DeviceKey::MockId(_) => {
             return Err(BitBabblerError::Usb {
-                operation: "open",
+                operation: UsbOperation::Open,
                 source: None,
             });
         }
     };
 
-    let devices = rusb::devices().map_err(|e| BitBabblerError::from_rusb("list_devices", e))?;
+    let devices =
+        rusb::devices().map_err(|e| BitBabblerError::from_rusb(UsbOperation::ListDevices, e))?;
     for device in devices.iter() {
         if device.bus_number() != bus_number || device.address() != device_address {
             continue;
         }
         let desc = device
             .device_descriptor()
-            .map_err(|e| BitBabblerError::from_rusb("device_descriptor", e))?;
+            .map_err(|e| BitBabblerError::from_rusb(UsbOperation::DeviceDescriptor, e))?;
         if desc.vendor_id() != VENDOR_ID || desc.product_id() != PRODUCT_ID {
             continue;
         }
@@ -278,7 +285,9 @@ pub(crate) fn open_rusb(
         // Re-validate endpoints against the live descriptor.
         let live = read_endpoint_config(&device)?;
         if live != endpoints {
-            return Err(BitBabblerError::protocol("endpoint_config_changed"));
+            return Err(BitBabblerError::protocol(
+                ProtocolOperation::EndpointConfigChanged,
+            ));
         }
 
         let mut handle = RusbHandle::open_device(&device)?;
@@ -297,9 +306,9 @@ pub(crate) fn open_rusb(
 pub(crate) fn resolve_required_string(
     index: Option<u8>,
     read: Result<String, rusb::Error>,
-    missing_index_op: &'static str,
-    read_op: &'static str,
-    empty_op: &'static str,
+    missing_index_op: ProtocolOperation,
+    read_op: UsbOperation,
+    empty_op: ProtocolOperation,
 ) -> Result<String, BitBabblerError> {
     if index.is_none() {
         return Err(BitBabblerError::protocol(missing_index_op));
@@ -315,9 +324,9 @@ pub(crate) fn resolve_required_string(
 fn read_required_usb_string(
     handle: &rusb::DeviceHandle<rusb::GlobalContext>,
     index: Option<u8>,
-    missing_index_op: &'static str,
-    read_op: &'static str,
-    empty_op: &'static str,
+    missing_index_op: ProtocolOperation,
+    read_op: UsbOperation,
+    empty_op: ProtocolOperation,
 ) -> Result<String, BitBabblerError> {
     let read = match index {
         Some(i) => handle.read_string_descriptor_ascii(i),
@@ -340,10 +349,12 @@ fn read_endpoint_config(
 ) -> Result<EndpointConfig, BitBabblerError> {
     let config = device
         .config_descriptor(USB_CONFIGURATION.saturating_sub(1))
-        .map_err(|e| BitBabblerError::from_rusb("config_descriptor", e))?;
+        .map_err(|e| BitBabblerError::from_rusb(UsbOperation::ConfigDescriptor, e))?;
 
     if config.number() != USB_CONFIGURATION {
-        return Err(BitBabblerError::protocol("usb_configuration"));
+        return Err(BitBabblerError::protocol(
+            ProtocolOperation::UsbConfiguration,
+        ));
     }
 
     let mut matched_iface = None;
@@ -359,10 +370,11 @@ fn read_endpoint_config(
         }
     }
 
-    let alt = matched_iface.ok_or_else(|| BitBabblerError::protocol("usb_interface"))?;
+    let alt =
+        matched_iface.ok_or_else(|| BitBabblerError::protocol(ProtocolOperation::UsbInterface))?;
     let endpoints: Vec<_> = alt.endpoint_descriptors().collect();
     if endpoints.len() != 2 {
-        return Err(BitBabblerError::protocol("endpoint_count"));
+        return Err(BitBabblerError::protocol(ProtocolOperation::EndpointCount));
     }
 
     // Official layout: endpoint[0] is IN, endpoint[1] is OUT.
@@ -370,24 +382,32 @@ fn read_endpoint_config(
     let ep1 = &endpoints[1];
 
     if ep0.direction() != rusb::Direction::In {
-        return Err(BitBabblerError::protocol("endpoint_in_direction"));
+        return Err(BitBabblerError::protocol(
+            ProtocolOperation::EndpointInDirection,
+        ));
     }
     if ep1.direction() != rusb::Direction::Out {
-        return Err(BitBabblerError::protocol("endpoint_out_direction"));
+        return Err(BitBabblerError::protocol(
+            ProtocolOperation::EndpointOutDirection,
+        ));
     }
     if ep0.transfer_type() != rusb::TransferType::Bulk
         || ep1.transfer_type() != rusb::TransferType::Bulk
     {
-        return Err(BitBabblerError::protocol("endpoint_transfer_type"));
+        return Err(BitBabblerError::protocol(
+            ProtocolOperation::EndpointTransferType,
+        ));
     }
 
     let max_packet = ep0.max_packet_size();
     if max_packet <= 2 {
-        return Err(BitBabblerError::protocol("max_packet_size"));
+        return Err(BitBabblerError::protocol(ProtocolOperation::MaxPacketSize));
     }
     // Prefer the IN endpoint's max packet; OUT should match for FTDI.
     if ep1.max_packet_size() != max_packet {
-        return Err(BitBabblerError::protocol("max_packet_mismatch"));
+        return Err(BitBabblerError::protocol(
+            ProtocolOperation::MaxPacketMismatch,
+        ));
     }
 
     Ok(EndpointConfig {
@@ -784,16 +804,16 @@ pub(crate) mod mock {
 #[cfg(test)]
 mod tests {
     use super::resolve_required_string;
-    use crate::error::BitBabblerError;
+    use crate::error::{BitBabblerError, ProtocolOperation, UsbOperation};
 
     #[test]
     fn product_string_rusb_error_is_preserved() {
         let err = resolve_required_string(
             Some(1),
             Err(rusb::Error::Access),
-            "missing_product_string_index",
-            "read_product_string",
-            "empty_product_string",
+            ProtocolOperation::MissingProductStringIndex,
+            UsbOperation::ReadProductString,
+            ProtocolOperation::EmptyProductString,
         )
         .unwrap_err();
         assert_eq!(err, BitBabblerError::PermissionDenied);
@@ -804,9 +824,9 @@ mod tests {
         let err = resolve_required_string(
             Some(2),
             Err(rusb::Error::Busy),
-            "missing_serial_string_index",
-            "read_serial_string",
-            "empty_serial_string",
+            ProtocolOperation::MissingSerialStringIndex,
+            UsbOperation::ReadSerialString,
+            ProtocolOperation::EmptySerialString,
         )
         .unwrap_err();
         assert_eq!(err, BitBabblerError::DeviceBusy);
@@ -817,15 +837,15 @@ mod tests {
         let err = resolve_required_string(
             Some(2),
             Err(rusb::Error::Timeout),
-            "missing_serial_string_index",
-            "read_serial_string",
-            "empty_serial_string",
+            ProtocolOperation::MissingSerialStringIndex,
+            UsbOperation::ReadSerialString,
+            ProtocolOperation::EmptySerialString,
         )
         .unwrap_err();
         assert_eq!(
             err,
             BitBabblerError::TransferTimeout {
-                operation: "read_serial_string"
+                operation: UsbOperation::ReadSerialString
             }
         );
     }
@@ -835,15 +855,15 @@ mod tests {
         let err = resolve_required_string(
             None,
             Ok("ignored".into()),
-            "missing_product_string_index",
-            "read_product_string",
-            "empty_product_string",
+            ProtocolOperation::MissingProductStringIndex,
+            UsbOperation::ReadProductString,
+            ProtocolOperation::EmptyProductString,
         )
         .unwrap_err();
         assert_eq!(
             err,
             BitBabblerError::ProtocolViolation {
-                operation: "missing_product_string_index"
+                operation: ProtocolOperation::MissingProductStringIndex
             }
         );
     }
@@ -853,15 +873,15 @@ mod tests {
         let err = resolve_required_string(
             None,
             Ok("ignored".into()),
-            "missing_serial_string_index",
-            "read_serial_string",
-            "empty_serial_string",
+            ProtocolOperation::MissingSerialStringIndex,
+            UsbOperation::ReadSerialString,
+            ProtocolOperation::EmptySerialString,
         )
         .unwrap_err();
         assert_eq!(
             err,
             BitBabblerError::ProtocolViolation {
-                operation: "missing_serial_string_index"
+                operation: ProtocolOperation::MissingSerialStringIndex
             }
         );
     }
@@ -871,15 +891,15 @@ mod tests {
         let err = resolve_required_string(
             Some(2),
             Ok("   ".into()),
-            "missing_serial_string_index",
-            "read_serial_string",
-            "empty_serial_string",
+            ProtocolOperation::MissingSerialStringIndex,
+            UsbOperation::ReadSerialString,
+            ProtocolOperation::EmptySerialString,
         )
         .unwrap_err();
         assert_eq!(
             err,
             BitBabblerError::ProtocolViolation {
-                operation: "empty_serial_string"
+                operation: ProtocolOperation::EmptySerialString
             }
         );
         // MissingSerial remains reserved for open_by_serial("") argument errors.
@@ -891,15 +911,15 @@ mod tests {
         let err = resolve_required_string(
             Some(1),
             Ok(String::new()),
-            "missing_product_string_index",
-            "read_product_string",
-            "empty_product_string",
+            ProtocolOperation::MissingProductStringIndex,
+            UsbOperation::ReadProductString,
+            ProtocolOperation::EmptyProductString,
         )
         .unwrap_err();
         assert_eq!(
             err,
             BitBabblerError::ProtocolViolation {
-                operation: "empty_product_string"
+                operation: ProtocolOperation::EmptyProductString
             }
         );
     }
@@ -909,9 +929,9 @@ mod tests {
         let value = resolve_required_string(
             Some(1),
             Ok("  White RNG  ".into()),
-            "missing_product_string_index",
-            "read_product_string",
-            "empty_product_string",
+            ProtocolOperation::MissingProductStringIndex,
+            UsbOperation::ReadProductString,
+            ProtocolOperation::EmptyProductString,
         )
         .unwrap();
         assert_eq!(value, "White RNG");
@@ -922,15 +942,15 @@ mod tests {
         let err = resolve_required_string(
             Some(1),
             Err(rusb::Error::Pipe),
-            "missing_product_string_index",
-            "read_product_string",
-            "empty_product_string",
+            ProtocolOperation::MissingProductStringIndex,
+            UsbOperation::ReadProductString,
+            ProtocolOperation::EmptyProductString,
         )
         .unwrap_err();
         assert_eq!(
             err,
             BitBabblerError::Usb {
-                operation: "read_product_string",
+                operation: UsbOperation::ReadProductString,
                 source: Some(rusb::Error::Pipe),
             }
         );

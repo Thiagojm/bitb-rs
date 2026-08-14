@@ -7,6 +7,16 @@ use crate::BitBabblerError;
 /// Fold `n` reads `2^n` consecutive raw segments of the requested length and
 /// combines them with successive byte-wise XOR. [`Fold::Raw`] (`0`) performs no
 /// folding and is the crate default.
+///
+/// # Examples
+///
+/// ```
+/// use bitb_rs::Fold;
+///
+/// assert_eq!(Fold::try_from(0)?, Fold::Raw);
+/// assert_eq!(Fold::try_from(2)?.segment_count(), 4);
+/// # Ok::<(), bitb_rs::BitBabblerError>(())
+/// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Fold {
@@ -40,6 +50,24 @@ impl Fold {
 impl TryFrom<u8> for Fold {
     type Error = BitBabblerError;
 
+    /// Converts a numeric fold depth into a [`Fold`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BitBabblerError::InvalidFold`] if `value` is outside `0..=4`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bitb_rs::Fold;
+    ///
+    /// assert_eq!(Fold::try_from(1)?, Fold::One);
+    /// assert!(matches!(
+    ///     Fold::try_from(5),
+    ///     Err(bitb_rs::BitBabblerError::InvalidFold { value: 5 })
+    /// ));
+    /// # Ok::<(), bitb_rs::BitBabblerError>(())
+    /// ```
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Raw),

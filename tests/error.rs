@@ -1,6 +1,6 @@
 //! Public error Display and distinguishability.
 
-use bitb_rs::BitBabblerError;
+use bitb_rs::{BitBabblerError, ProtocolOperation, UsbOperation};
 
 #[test]
 fn display_non_empty_for_public_variants() {
@@ -21,14 +21,21 @@ fn display_non_empty_for_public_variants() {
         BitBabblerError::DeviceBusy,
         BitBabblerError::DeviceDisconnected,
         BitBabblerError::TransferTimeout {
-            operation: "bulk_read",
+            operation: UsbOperation::BulkRead,
         },
         BitBabblerError::Usb {
-            operation: "open",
+            operation: UsbOperation::Open,
             source: None,
         },
-        BitBabblerError::ProtocolViolation { operation: "sync" },
-        BitBabblerError::InitializationFailed { attempts: 1 },
+        BitBabblerError::ProtocolViolation {
+            operation: ProtocolOperation::MpsseSync,
+        },
+        BitBabblerError::InitializationFailed {
+            attempts: 1,
+            source: Box::new(BitBabblerError::ProtocolViolation {
+                operation: ProtocolOperation::MpsseSync,
+            }),
+        },
         BitBabblerError::ReadRetriesExhausted { attempts: 1 },
         BitBabblerError::RangeSamplingExhausted { attempts: 1 },
     ];
@@ -44,4 +51,20 @@ fn matchable_variants() {
         BitBabblerError::MultipleDevices { count } => assert_eq!(count, 3),
         other => panic!("unexpected {other:?}"),
     }
+}
+
+#[test]
+fn initialization_failed_exposes_source() {
+    let err = BitBabblerError::InitializationFailed {
+        attempts: 2,
+        source: Box::new(BitBabblerError::ProtocolViolation {
+            operation: ProtocolOperation::ModemStatus,
+        }),
+    };
+    assert_eq!(
+        std::error::Error::source(&err)
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("protocol violation during modem_status")
+    );
 }

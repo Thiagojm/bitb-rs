@@ -68,7 +68,7 @@ This crate never installs udev rules.
 
 ## Quick start
 
-```rust
+```rust,no_run
 use bitb_rs::{BitBabbler, BitBabblerError, Fold};
 
 fn main() -> Result<(), BitBabblerError> {
@@ -97,7 +97,7 @@ fn main() -> Result<(), BitBabblerError> {
 
 ### Several devices
 
-```rust
+```rust,no_run
 use bitb_rs::{BitBabbler, BitBabblerError};
 
 fn main() -> Result<(), BitBabblerError> {

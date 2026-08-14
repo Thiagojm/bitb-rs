@@ -19,6 +19,7 @@ pub enum DeviceVariant {
 
 /// Snapshot of a recognized BitBabbler device.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeviceInfo {
     /// Hardware variant.
     pub variant: DeviceVariant,
@@ -37,6 +38,19 @@ pub struct DeviceInfo {
 /// Operations that consume entropy take `&mut self`. The type is not `Sync`.
 /// On disconnect or a reset that invalidates the USB handle, methods return a
 /// typed error and the consumer must open a new instance.
+///
+/// # Examples
+///
+/// ```no_run
+/// use bitb_rs::{BitBabbler, BitBabblerError};
+///
+/// fn main() -> Result<(), BitBabblerError> {
+///     let mut dev = BitBabbler::open()?;
+///     let raw = dev.get_bits(64)?;
+///     assert_eq!(raw.len(), 8);
+///     Ok(())
+/// }
+/// ```
 pub struct BitBabbler {
     handle: Box<dyn UsbHandle + Send>,
     session: FtdiSession,
@@ -56,6 +70,31 @@ impl BitBabbler {
     ///
     /// Devices with VID:PID `0403:7840` and an unrecognized product string
     /// produce [`BitBabblerError::UnsupportedProduct`] instead of being omitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BitBabblerError::UnsupportedProduct`] if a matching VID:PID
+    /// reports a product string other than `White RNG` or `Black RNG`.
+    /// Returns [`BitBabblerError::PermissionDenied`],
+    /// [`BitBabblerError::DeviceBusy`], or
+    /// [`BitBabblerError::DeviceDisconnected`] on USB access failures.
+    /// Returns [`BitBabblerError::TransferTimeout`] or [`BitBabblerError::Usb`]
+    /// for other USB failures while enumerating or reading descriptors.
+    /// Returns [`BitBabblerError::ProtocolViolation`] if required string
+    /// descriptors or endpoint layout are missing or invalid.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitb_rs::{BitBabbler, BitBabblerError};
+    ///
+    /// fn main() -> Result<(), BitBabblerError> {
+    ///     for info in BitBabbler::list_devices()? {
+    ///         let _ = (info.variant, info.serial.len());
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn list_devices() -> Result<Vec<DeviceInfo>, BitBabblerError> {
         let enumerated = transport::enumerate_rusb()?;
         let mut out = Vec::with_capacity(enumerated.len());
@@ -67,9 +106,28 @@ impl BitBabbler {
 
     /// Opens the only attached recognized BitBabbler.
     ///
-    /// - no device → [`BitBabblerError::NoDevice`]
-    /// - one device → opens it
-    /// - multiple → [`BitBabblerError::MultipleDevices`]
+    /// # Errors
+    ///
+    /// Returns [`BitBabblerError::NoDevice`] if no recognized device is present.
+    /// Returns [`BitBabblerError::MultipleDevices`] if more than one recognized
+    /// device is present.
+    /// Returns [`BitBabblerError::UnsupportedProduct`] if a matching VID:PID
+    /// reports an unrecognized product string.
+    /// Returns [`BitBabblerError::InitializationFailed`] if FTDI/MPSSE
+    /// initialization exhausts its retry budget.
+    /// Also returns the USB, permission, busy, disconnect, timeout, and
+    /// protocol errors documented on [`Self::list_devices`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitb_rs::{BitBabbler, BitBabblerError};
+    ///
+    /// fn main() -> Result<(), BitBabblerError> {
+    ///     let _dev = BitBabbler::open()?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn open() -> Result<Self, BitBabblerError> {
         let candidates = recognized_candidates(transport::enumerate_rusb()?)?;
         match candidates.len() {
@@ -80,6 +138,29 @@ impl BitBabbler {
     }
 
     /// Opens the recognized BitBabbler with an exact serial match.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BitBabblerError::MissingSerial`] if `serial` is empty.
+    /// Returns [`BitBabblerError::DeviceNotFound`] if no recognized device has
+    /// that serial.
+    /// Returns [`BitBabblerError::UnsupportedProduct`] if the matching serial
+    /// belongs to an unrecognized product string.
+    /// Returns [`BitBabblerError::InitializationFailed`] if FTDI/MPSSE
+    /// initialization exhausts its retry budget.
+    /// Also returns the USB, permission, busy, disconnect, timeout, and
+    /// protocol errors documented on [`Self::list_devices`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitb_rs::{BitBabbler, BitBabblerError};
+    ///
+    /// fn main() -> Result<(), BitBabblerError> {
+    ///     let _dev = BitBabbler::open_by_serial("SERIAL")?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn open_by_serial(serial: &str) -> Result<Self, BitBabblerError> {
         if serial.is_empty() {
             return Err(BitBabblerError::MissingSerial);
@@ -121,6 +202,23 @@ impl BitBabbler {
     /// Reads `n_bits` of raw entropy (`fold = 0`).
     ///
     /// Equivalent to [`Self::get_bits_with_fold`] with [`Fold::Raw`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::get_bits_with_fold`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitb_rs::{BitBabbler, BitBabblerError};
+    ///
+    /// fn main() -> Result<(), BitBabblerError> {
+    ///     let mut dev = BitBabbler::open()?;
+    ///     let raw = dev.get_bits(256)?;
+    ///     assert_eq!(raw.len(), 32);
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn get_bits(&mut self, n_bits: usize) -> Result<Vec<u8>, BitBabblerError> {
         self.get_bits_with_fold(n_bits, Fold::Raw)
     }
@@ -131,6 +229,33 @@ impl BitBabbler {
     /// - returns exactly `n_bits / 8` bytes
     /// - fold is per-call only and is never stored on the handle
     /// - on failure, no partial buffer is returned
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BitBabblerError::ZeroBitLength`] if `n_bits` is zero.
+    /// Returns [`BitBabblerError::BitLengthNotByteAligned`] if `n_bits` is not
+    /// divisible by 8.
+    /// Returns [`BitBabblerError::AllocationFailed`] if the output buffer cannot
+    /// be reserved.
+    /// Returns [`BitBabblerError::ReadRetriesExhausted`] if empty or incomplete
+    /// reads exhaust the retry budget.
+    /// Returns [`BitBabblerError::InitializationFailed`] if a mid-read MPSSE
+    /// recovery exhausts its retry budget.
+    /// Also returns USB, permission, busy, disconnect, timeout, and protocol
+    /// errors from the underlying transfer.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitb_rs::{BitBabbler, BitBabblerError, Fold};
+    ///
+    /// fn main() -> Result<(), BitBabblerError> {
+    ///     let mut dev = BitBabbler::open()?;
+    ///     let folded = dev.get_bits_with_fold(256, Fold::One)?;
+    ///     assert_eq!(folded.len(), 32);
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn get_bits_with_fold(
         &mut self,
         n_bits: usize,
@@ -175,6 +300,22 @@ impl BitBabbler {
     }
 
     /// Returns 8 raw bytes interpreted as a little-endian `u64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::get_bits`] for a 64-bit request.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitb_rs::{BitBabbler, BitBabblerError};
+    ///
+    /// fn main() -> Result<(), BitBabblerError> {
+    ///     let mut dev = BitBabbler::open()?;
+    ///     let _word = dev.random_u64()?;
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn random_u64(&mut self) -> Result<u64, BitBabblerError> {
         let bytes = self.get_bits(64)?;
         let mut arr = [0u8; 8];
@@ -186,6 +327,26 @@ impl BitBabbler {
     ///
     /// Uses rejection sampling to avoid modulo bias. Empty or inverted ranges
     /// fail before any device I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BitBabblerError::InvalidRange`] if `start >= end`.
+    /// Returns [`BitBabblerError::RangeSamplingExhausted`] if rejection sampling
+    /// exceeds its draw budget.
+    /// Also returns the errors of [`Self::random_u64`] for each sample.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use bitb_rs::{BitBabbler, BitBabblerError};
+    ///
+    /// fn main() -> Result<(), BitBabblerError> {
+    ///     let mut dev = BitBabbler::open()?;
+    ///     let n = dev.random_range(10..20)?;
+    ///     assert!((10..20).contains(&n));
+    ///     Ok(())
+    /// }
+    /// ```
     pub fn random_range(&mut self, range: Range<u64>) -> Result<u64, BitBabblerError> {
         let start = range.start;
         let end = range.end;
