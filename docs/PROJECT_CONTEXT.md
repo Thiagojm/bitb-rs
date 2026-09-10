@@ -33,6 +33,13 @@ Provide a small synchronous Rust library to open one TNRG BitBabbler White or Bl
 
 ## Validation state
 
+- **2026-09-10 correction (publication authorized):** failed acquisition handles cannot
+  consume late replies; sync/purge have total budgets; Drop does not drain input.
+  Stable and MSRV 1.85 all-target tests passed (75 deterministic, three physical
+  ignored), plus clippy and 12 doctests. New regressions cover timeout/protocol
+  failure followed by reuse through every public read API, invalid requests,
+  continuous unexpected replies and cleanup. Physical retest remains pending.
+
 - **Deterministic (Windows):** fmt, check, test, clippy `-D warnings`, doctest, MSRV 1.85.0 — passed. Hardware tests are `#[ignore]` in the default suite.
 - **Physical White (Windows):** validated with
   `cargo test --test hardware -- --ignored --test-threads=1 --nocapture`

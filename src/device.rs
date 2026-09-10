@@ -37,7 +37,9 @@ pub struct DeviceInfo {
 ///
 /// Operations that consume entropy take `&mut self`. The type is not `Sync`.
 /// On disconnect or a reset that invalidates the USB handle, methods return a
-/// typed error and the consumer must open a new instance.
+/// typed error and the consumer must open a new instance. Any acquisition I/O or
+/// protocol failure invalidates the instance; later valid requests return
+/// [`BitBabblerError::DeviceDisconnected`] without USB I/O.
 ///
 /// # Examples
 ///
@@ -55,6 +57,7 @@ pub struct BitBabbler {
     handle: Box<dyn UsbHandle + Send>,
     session: FtdiSession,
     info: DeviceInfo,
+    failed: bool,
 }
 
 impl std::fmt::Debug for BitBabbler {
@@ -229,6 +232,7 @@ impl BitBabbler {
     /// - returns exactly `n_bits / 8` bytes
     /// - fold is per-call only and is never stored on the handle
     /// - on failure, no partial buffer is returned
+    /// - acquisition I/O/protocol errors invalidate the handle; reopen before retrying
     ///
     /// # Errors
     ///
@@ -271,6 +275,9 @@ impl BitBabbler {
         }
 
         let n_bytes = n_bits / 8;
+        if self.failed {
+            return Err(BitBabblerError::DeviceDisconnected);
+        }
         let segments = fold.segment_count();
 
         // Overflow guard: total raw bytes = n_bytes * segments
@@ -291,6 +298,8 @@ impl BitBabbler {
         match self.read_folded_segments(&mut out, segments) {
             Ok(()) => Ok(out),
             Err(e) => {
+                // A late USB reply must never satisfy a subsequent acquisition.
+                self.failed = !matches!(e, BitBabblerError::AllocationFailed { .. });
                 // Ensure partial data is not observable (already owned locally).
                 out.clear();
                 self.session.clear_chunk();
@@ -494,6 +503,7 @@ fn open_enumerated(dev: &EnumeratedDevice) -> Result<BitBabbler, BitBabblerError
         handle: Box::new(handle),
         session,
         info,
+        failed: false,
     })
 }
 
@@ -536,6 +546,7 @@ pub(crate) mod test_support {
             handle: Box::new(handle),
             session,
             info,
+            failed: false,
         })
     }
 
@@ -810,5 +821,81 @@ mod tests {
     fn open_by_serial_empty_public() {
         let err = BitBabbler::open_by_serial("").unwrap_err();
         assert_eq!(err, BitBabblerError::MissingSerial);
+    }
+    #[test]
+    fn failed_acquisition_blocks_late_reply_for_all_public_read_apis() {
+        use crate::transport::mock::MockResponse;
+        for failure in [
+            BitBabblerError::TransferTimeout {
+                operation: crate::UsbOperation::BulkRead,
+            },
+            BitBabblerError::protocol(crate::ProtocolOperation::LineStatus),
+        ] {
+            let c = MockCandidate::white(1, "W1");
+            let mut dev = test_support::open_mock_initialized(&c).unwrap();
+            c.handle
+                .push_response(MockResponse::Bytes(vec![0x31, 0x60, 1, 2]));
+            c.handle.push_response(MockResponse::Err(failure.clone()));
+            assert_eq!(dev.get_bits(64).unwrap_err(), failure);
+            // Old command's remaining bytes arrive after its failure.
+            c.handle
+                .push_response(MockResponse::Bytes(vec![0x31, 0x60, 3, 4, 5, 6, 7, 8]));
+            let before = c.handle.log();
+            assert_eq!(
+                dev.get_bits(48).unwrap_err(),
+                BitBabblerError::DeviceDisconnected
+            );
+            assert_eq!(
+                dev.get_bits_with_fold(48, Fold::One).unwrap_err(),
+                BitBabblerError::DeviceDisconnected
+            );
+            assert_eq!(
+                dev.random_u64().unwrap_err(),
+                BitBabblerError::DeviceDisconnected
+            );
+            assert_eq!(
+                dev.random_range(0..10).unwrap_err(),
+                BitBabblerError::DeviceDisconnected
+            );
+            assert_eq!(c.handle.log(), before);
+        }
+    }
+
+    #[test]
+    fn invalid_requests_leave_handle_usable() {
+        let c = MockCandidate::white(1, "W1");
+        let mut dev = test_support::open_mock_initialized(&c).unwrap();
+        assert!(dev.get_bits(0).is_err());
+        assert!(dev.get_bits(7).is_err());
+        assert!(dev.random_range(1..1).is_err());
+        c.handle.push_entropy(&[42]);
+        assert_eq!(dev.get_bits(8).unwrap(), vec![42]);
+    }
+
+    #[test]
+    fn drop_does_not_drain_input_and_still_releases_interface() {
+        use crate::transport::mock::{MockResponse, RecordedOp};
+        let c = MockCandidate::white(1, "W1");
+        let dev = test_support::open_mock_initialized(&c).unwrap();
+        c.handle
+            .push_response(MockResponse::Bytes(vec![0x31, 0x60, 1]));
+        let before = c.handle.log().len();
+        drop(dev);
+        assert_eq!(
+            &c.handle.log()[before..],
+            &[
+                RecordedOp::ControlOut {
+                    request: 0x0B,
+                    value: 0,
+                    index: 1
+                },
+                RecordedOp::ControlOut {
+                    request: 0,
+                    value: 0,
+                    index: 1
+                },
+                RecordedOp::ReleaseInterface(0),
+            ]
+        );
     }
 }

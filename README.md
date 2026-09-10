@@ -128,7 +128,15 @@ Failures return a typed [`BitBabblerError`]. Collection methods never return par
 
 If the device is unplugged or a reset invalidates the handle, methods return an error such as `DeviceDisconnected`. **Discard the instance and call `open` / `open_by_serial` again.** The crate does not re-enumerate or reopen automatically.
 
-`Drop` best-effort resets the FTDI bitmode and releases the interface; failures during drop do not panic.
+An acquisition I/O or protocol failure also invalidates the instance: the first
+call preserves its original error; later valid reads return `DeviceDisconnected`
+without USB I/O. This prevents a delayed reply from being reused as a new sample.
+Invalid arguments and allocation failures do not invalidate a healthy handle.
+Sync and input purge each allow at most 64 bulk reads, including nonempty replies;
+the existing per-transfer timeout and outer initialization budget still apply.
+
+`Drop` best-effort resets the FTDI bitmode and releases the interface without
+draining input; failures during drop do not panic.
 
 ## Async / Tauri / Tokio
 

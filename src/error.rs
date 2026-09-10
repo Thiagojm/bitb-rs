@@ -100,6 +100,8 @@ pub enum ProtocolOperation {
     UnsupportedMaxPacket,
     /// MPSSE AA/AB sync handshake failed.
     MpsseSync,
+    /// Input drain exceeded its total transfer budget.
+    PurgeReadLimit,
     /// Requested MPSSE read length is zero or above the command limit.
     MpsseReadLength,
     /// Device returned more payload than the MPSSE command requested.
@@ -136,6 +138,7 @@ impl ProtocolOperation {
             Self::MaxPacketMismatch => "max_packet_mismatch",
             Self::UnsupportedMaxPacket => "unsupported_max_packet",
             Self::MpsseSync => "mpsse_sync",
+            Self::PurgeReadLimit => "purge_read_limit",
             Self::MpsseReadLength => "mpsse_read_length",
             Self::ExcessPayload => "excess_payload",
             Self::IncompleteLineStatus => "incomplete_line_status",

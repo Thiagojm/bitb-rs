@@ -6,6 +6,9 @@ pub(crate) const USB_TIMEOUT_MS: u32 = 5_000;
 /// Empty or incomplete FTDI bulk read retries before recovery/failure.
 pub(crate) const FTDI_READ_RETRIES: u32 = 10;
 
+/// Total reads per sync/purge, including nonempty unexpected replies.
+pub(crate) const FTDI_DRAIN_READ_LIMIT: u32 = 64;
+
 /// Full FTDI/MPSSE initialization attempts before giving up.
 pub(crate) const FTDI_INIT_RETRIES: u32 = 20;
 

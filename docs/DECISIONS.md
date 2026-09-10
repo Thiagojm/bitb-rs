@@ -18,3 +18,16 @@
 - **USB/protocol discriminators are enums** (`UsbOperation`, `ProtocolOperation`), not `&'static str`.
 - **`InitializationFailed` keeps the last non-fatal cause** in `source` and exposes it via `Error::source`.
 - Fatal USB presence/access errors (`DeviceDisconnected`, `PermissionDenied`, `DeviceBusy`) still abort init immediately.
+
+## 2026-09-10 — Acquisition failure and bounded cleanup
+
+- Acquisition I/O/protocol failure invalidates the handle. Preserve the original
+  error, then return `DeviceDisconnected` without I/O on later valid reads until
+  the consumer drops/reopens. Argument/allocation failures do not invalidate it.
+- Normal acquisitions remain exact MPSSE command/response reads, without a
+  per-sample purge. No automatic reopen or stale-reply recovery is introduced.
+- Sync/purge have a total 64-transfer budget independent of empty streaks;
+  purge exhaustion reports `ProtocolOperation::PurgeReadLimit`. Existing transfer
+  timeouts and outer initialization retries remain; this is not a short wall-clock SLA.
+- Drop sends only best-effort reset controls before interface release, never
+  drains input. Continuous malformed payload cannot extend cleanup.

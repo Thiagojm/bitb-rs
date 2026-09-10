@@ -13,6 +13,11 @@
 
 ## Ativo
 
+- Implemented locally: invalidate failed acquisition handles, bound sync/purge,
+  remove input drain from Drop; regression/stable/MSRV/clippy/doc checks passed.
+- Publication authorized; integrate a reachable revision through rngkit-core
+  and RngKit, then retest native acquisition, folds and disconnect behavior.
+
 - Physical **Black** validation when a Black unit is available.
 - Linux host mock/build (and hardware if present).
 

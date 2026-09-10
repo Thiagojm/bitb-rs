@@ -5,9 +5,9 @@
 
 use crate::error::{BitBabblerError, ProtocolOperation};
 use crate::policy::{
-    CLOCK_SETTLE_MS, FTDI_INIT_RETRIES, FTDI_INTERFACE_INDEX, FTDI_READ_RETRIES,
-    MAX_MPSSE_READ_BYTES, MPSSE_SETTLE_MS, clock_divisor, latency_timer_ms, pin_direction_byte,
-    pin_value_byte,
+    CLOCK_SETTLE_MS, FTDI_DRAIN_READ_LIMIT, FTDI_INIT_RETRIES, FTDI_INTERFACE_INDEX,
+    FTDI_READ_RETRIES, MAX_MPSSE_READ_BYTES, MPSSE_SETTLE_MS, clock_divisor, latency_timer_ms,
+    pin_direction_byte, pin_value_byte,
 };
 use crate::transport::{EndpointConfig, UsbHandle};
 
@@ -194,7 +194,7 @@ fn check_sync<H: UsbHandle + ?Sized>(
     let max_packet = usize::from(session.endpoints.max_packet);
     let mut buf = vec![0u8; max_packet.max(512)];
 
-    while empty_streak < FTDI_READ_RETRIES {
+    for _ in 0..FTDI_DRAIN_READ_LIMIT {
         let n = handle.bulk_read(session.endpoints.ep_in, &mut buf)?;
         if n == 4 && buf[2] == 0xFA && buf[3] == cmd {
             return Ok(true);
@@ -204,6 +204,9 @@ fn check_sync<H: UsbHandle + ?Sized>(
             empty_streak = 0;
         } else {
             empty_streak += 1;
+            if empty_streak >= FTDI_READ_RETRIES {
+                break;
+            }
         }
     }
     Ok(false)
@@ -214,7 +217,7 @@ pub(crate) fn reset_bitmode_best_effort<H: UsbHandle + ?Sized>(
     handle: &mut H,
     session: &mut FtdiSession,
 ) {
-    let _ = purge_read(handle, session);
+    // Closing needs no input drain; malformed continuous input must not delay Drop.
     let _ = ftdi_set_bitmode(handle, BITMODE_RESET, 0);
     let _ = ftdi_reset(handle);
     session.clear_chunk();
@@ -528,7 +531,7 @@ fn purge_read<H: UsbHandle + ?Sized>(
     let mut count = 0usize;
     let mut empty_streak = 0u32;
 
-    while empty_streak < FTDI_READ_RETRIES {
+    for _ in 0..FTDI_DRAIN_READ_LIMIT {
         let n = match handle.bulk_read(session.endpoints.ep_in, &mut buf) {
             Ok(n) => n,
             Err(BitBabblerError::TransferTimeout { .. }) => 0,
@@ -539,9 +542,12 @@ fn purge_read<H: UsbHandle + ?Sized>(
             empty_streak = 0;
         } else {
             empty_streak += 1;
+            if empty_streak >= FTDI_READ_RETRIES {
+                return Ok(count);
+            }
         }
     }
-    Ok(count)
+    Err(BitBabblerError::protocol(ProtocolOperation::PurgeReadLimit))
 }
 
 fn ftdi_reset<H: UsbHandle + ?Sized>(handle: &mut H) -> Result<(), BitBabblerError> {
@@ -986,6 +992,33 @@ mod tests {
             let out = read_exact_raw(&mut handle, &mut session, n).unwrap();
             assert_eq!(out.len(), n);
             assert_eq!(out, data);
+        }
+    }
+    #[test]
+    fn sync_and_purge_bound_nonempty_unexpected_replies() {
+        use crate::transport::mock::RecordedOp;
+        for sync in [true, false] {
+            let mut handle = MockHandle::new(64);
+            let mut session = session_64();
+            for _ in 0..=FTDI_DRAIN_READ_LIMIT {
+                handle.push_response(MockResponse::Bytes(vec![0x31, 0x60, 0x01]));
+            }
+            if sync {
+                assert!(!check_sync(&mut handle, &mut session, 0xAA).unwrap());
+            } else {
+                assert_eq!(
+                    purge_read(&mut handle, &mut session).unwrap_err(),
+                    BitBabblerError::protocol(ProtocolOperation::PurgeReadLimit)
+                );
+            }
+            assert_eq!(
+                handle
+                    .log()
+                    .iter()
+                    .filter(|op| matches!(op, RecordedOp::BulkRead(_)))
+                    .count(),
+                FTDI_DRAIN_READ_LIMIT as usize
+            );
         }
     }
 }
